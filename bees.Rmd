@@ -1,0 +1,195 @@
+---
+title: "Analysis of Bee-haviour"
+author: "Zac Greene"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  pdf_document: 
+    fig_crop: no
+    keep_tex: yes
+    latex_engine: xelatex
+    toc: yes
+  html_document:
+    toc: yes
+---
+```{r setUp, message=FALSE, warning=FALSE, highlight=TRUE}
+# Packages used during this analysis
+library(tidyverse)
+library(lme4)
+library(MuMIn)
+library(knitr)
+
+rm(list = ls()) # clear memory
+df_bees <- read.csv("Bees.csv")
+```
+
+# Part 1
+## Modeling the problem
+For each data-point 'tags' was used as sample population, and 'detected' the number of bees active in that hive on that day. 
+Be activity can then be modelled as a Binomial distribution where trials where n = 'tags', and 'successes' = 'detected'.
+
+## Initial Model
+Due to the applicability of the Binomial distribution a GLM was used for initial model cosideration, and an initial model was fit containing all possible interaction terms.
+
+```{r highlight=TRUE}
+# Initial GLM with all interaction effects
+fit_glm <- glm(cbind(detected, tags-detected) ~ 1 + temp*rain*wind,
+               family = binomial(link = 'logit'),
+               data = df_bees, na.action = na.fail)
+summary(fit_glm)
+```
+
+We can see from above that residual deviance (312.5) was over three times the residual degrees of freedom, implying the data are overdispersed with respect to the Binomial distribution.
+
+## Overdispersion and Mixed-Effect Models
+To deal with the overdispersion, an observational-level random effect was added, and the full model was re-fit.
+
+```{r highlight=TRUE}
+# Add observation-level random effects
+df_bees$Obs <- 1:nrow(df_bees)
+df_bees$Obs <- factor(df_bees$Obs)
+
+# Fit full glmer
+fit_glmer <- glmer(cbind(detected, tags) ~ 1 + temp*rain*wind + (1|Obs),
+               family = binomial(link = 'logit'),
+               data = df_bees, na.action = na.fail)
+
+```
+The full model, with all interaction terms fails to converge. 
+Due low likelihood of the three-way term being significant, and the difficulty of interpreting such a three-way interaction, it was removed from the model.
+A simpler model with only two-way interactions was fit.
+
+```{r highlight=TRUE}
+# Fit without three-way interaction
+fit_glmer2 <- glmer(cbind(detected, tags) ~ 1 + temp + rain + wind +
+                      temp:rain + temp:wind + rain:wind + (1|Obs),
+               family = binomial(link = 'logit'),
+               data = df_bees, na.action = na.fail)
+summary(fit_glmer2)
+```
+The model fails to converge again, however it is significantly closer to converging than the previous model (max|grad| 0.027 vs 0.194).
+Instead of removing interaction terms in the hope of convergence, it was decided that an AIC analysis would be conducted on this model.
+
+#Part 2
+## AIC Analysis of Generalised Mixed-Effects Models
+The 'dredge' function (from the 'MuMIn' package) was used to produce an AIC table.
+```{r highlight=TRUE}
+# Dredge used to produce AIC table
+df_AIC <- dredge(fit_glmer2, rank = "AIC") %>%
+  select(-weight, -AIC)
+```
+We can see from the output above that many of the models failed to converge, but were reasonably close to the default tolerance level, so ther resulting parameter extimates are likely accurate enough.
+
+The AIC table was reformatted for readability.
+```{r}
+# Below formats AIC table for readability
+names(df_AIC)[1] <- "1"                  # rename the first column
+df_AIC$"1" <- "+"                        # make all first column "+"
+df_AIC$rain[!is.na(df_AIC$rain)] <- "+"    # replace numbers with "+"
+df_AIC$temp[!is.na(df_AIC$temp)] <- "+"    # replace numbers with "+"
+df_AIC$wind[!is.na(df_AIC$wind)] <- "+"    # replace numbers with "+"
+
+df_AIC$"rain:temp"[!is.na(df_AIC$"rain:temp")] <- "+"    # replace numbers with "+"
+df_AIC$"rain:wind"[!is.na(df_AIC$"rain:wind")] <- "+"    # replace numbers with "+"\
+df_AIC$"temp:wind"[!is.na(df_AIC$"temp:wind")] <- "+"    # replace numbers with "+"
+
+df_AIC$logLik <- round(df_AIC$logLik, 2) # round numbers to 2dp
+df_AIC$delta <- round(df_AIC$delta, 2)   # round numbers to 2dp
+
+```
+
+By filtering the models with a delta of less than six, the AIC table below was produced.
+```{r}
+#filter AIC table to show models with delta < 6
+filter(df_AIC, delta < 6) # display the AIC table for delta < 6
+```
+The AIC table above indicates that the best model is `1 + rain + temp`; all other models have higher delta (and there are no simpler nested models).
+
+## Analysis of Final Model
+The best-performing model for our AIC analysis was examined.
+```{r}
+# Fit best model from AIC table
+fit_glmer3 <- glmer(cbind(detected, tags) ~ 1 + temp + rain +(1|Obs),
+               family = binomial(link = 'logit'),
+               data = df_bees, na.action = na.fail)
+summary(fit_glmer3)
+```
+The model suggests that increasing temperature positively influences bee activity. Likewise, rainfall negatively impacts bee activity.
+
+# Part 3
+## Model Validation
+
+Our best model (according to the AIC analysis above) was used to predict the active number of bees for each data-point.
+```{r}
+# Add fitted values to bees data frame
+df_bees$fitted <- fitted(fit_glmer3)*df_bees$tags
+# Or could use invert link function as below
+# df_bees$predicted <- predict(fit_glmer3)
+#d f_bees$number <- exp(df_bees$predicted)/(1+exp(df_bees$predicted))*df_bees$tags
+```
+
+This model seems to fit the data reasonably well. The plot below suggests the observed and predicted values are similar.
+```{r}
+# Plot fitted vs observed over range of bee activity
+ggplot(data = df_bees, aes(x = detected, y = detected*100/tags)) +
+  geom_jitter(pch = 19, color = 'red') +
+  geom_jitter(aes(x = detected, y=fitted*100/tags)) +
+  labs(title = "Observed (red) vs Fitted (black)",
+       x = "Number of detected active bees",
+       y = "Percentage of total bees active") +
+  theme_bw()
+```
+
+```{r}
+# Compare fitted vs observed activity
+ggplot(data = df_bees, aes(x = (fitted*100/tags), y = detected*100/tags)) +
+  geom_jitter() +
+  geom_abline(slope = 1, colour = "red") +
+  labs(title = "Observed vs Predicted",
+       x = "Predicted percentage of bees active",
+       y = "Observed percentage of bees active") +
+  theme_bw()
+```
+The plot above confirms the fairly good fit of our model; however, it suggests its predicted values are slightly lower than observed, especially at higher values.
+
+##Considering Fixed Effects
+In order to predict bee activity for a typical hive, we need to remove the estimated random effect terms from our predictions, and only consider the fixed effects.
+
+```{r}
+# Extract fixed effects
+beta_model <- fixef(fit_glmer3) # extract fixed parameters from fit_glmer3
+df_bees <- df_bees %>%
+  mutate(
+    predicted_fix = beta_model[1] + beta_model[2]*temp + beta_model[3]*rain,
+    number_fix = exp(predicted_fix)/(1+exp(predicted_fix))*tags
+  )
+
+```
+
+
+When only fixed effects are considered, our model is significantly less accurate in its predictions; consistently under-estimating bee activity.
+```{r}
+# Plot fixed-effect predictions vs observed
+ggplot(data = df_bees, aes(x = (number_fix*100/tags), y = detected*100/tags)) +
+  geom_jitter() +
+  geom_abline(slope = 1, colour = "red") +
+  labs(title = "Observed vs Predicted - only fixed effects)",
+       x = "Predicted percentage of bees active",
+       y = "Observed percentage of bees active") +
+  theme_bw()
+```
+
+
+#Part 4
+#Conclusions
+Given the data, we have seen strong evidence that temperature is positively associated with bee activity, and that rain is negatively associated.
+Further, our best model suggested that these effects were similar in magnitude.
+
+Our best model's predictions were consistent with the observed data, however when only fixed effects were considered our model consistently under-predicted bee activity. This suggests other, unaccounted-for, factors may be influencing bee activity.
+
+
+
+
+
+
+
+
